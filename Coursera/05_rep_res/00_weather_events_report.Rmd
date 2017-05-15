@@ -1,0 +1,537 @@
+---
+title: "Health and Economic Impact of Storms and Extreme Weather Events"
+output:
+  html_document:
+    keep_md: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo  = TRUE)
+knitr::opts_chunk$set(cache = TRUE)
+```
+
+
+## Synopsis
+
+This report aims to determine the severe weather events that cause the most problems in terms of public health and economic impact.
+The conclusion is that tornadoes are the most injurous events with heat being the main cause of death.
+The most damaging events in terms of cost are caused by floods impacting property and drought events impact on agriculture.
+To investigate these events a data set from the U.S. National Oceanic and Atmospheric Administration's (NOAA) storm database was obtained.
+This contains data for major storms and weather events in the United States during the years from 1950 to 2011 and contains estimates on of any fatalities, injuries, and property damage.
+The storm data was processed and cleaned (detailed below) and then aggregated by weather event type to discover the most harmful and costly events.
+
+
+
+## Data Processing
+
+The raw data set was originally sourced from the U.S. National Oceanic and Atmospheric Administration's (NOAA) storm database.  For this report, the data was downloaded from this [link ](https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2).
+
+
+Other documentation that was used to create this report were:
+
+* National Weather Service [Storm Data Documentation](https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2Fpd01016005curr.pdf)
+* National Climatic Data Center Storm Events [FAQ](https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2FNCDC%20Storm%20Events-FAQ%20Page.pdf)
+* Coursera assignement [page](https://www.coursera.org/learn/reproducible-research/peer/OMZ37/course-project-2)
+* How To Handle Exponent Value of PROPDMGEXP and CROPDMGEXP - [link](https://rstudio-pubs-static.s3.amazonaws.com/58957_37b6723ee52b455990e149edde45e5b6.html)
+
+
+
+### Load and attach required packages
+
+The following libraries were used in creating the report.
+
+```{r message = FALSE, warning = FALSE}
+library(readr)     # for reading in the BZipped CSV data
+library(lubridate) # for handling dates
+library(dplyr)     # for processing data (aggregating, filtering etc)
+library(ggplot2)   # for plotting
+library(stringr)   # for string replacement when cleaing the EVTYPE data
+library(tidyr)     # for tidying and shaping data (gather) for plotting
+library(knitr)     # for using kable to generate tables
+```
+
+### Loading the storm data set
+
+The zipped (BZ2) CSV file was loaded using `readr::read_csv` into a data set (`tibble`) called `csv_storm_data`.  The file is a comma delimited file with missing values given as 'NA'.
+The `BGN_DATE` column was used to determine when the weather event happened.  The format of this date is explicity specified when reading in the data set since it is in a non-default format.
+
+
+```{r}
+storm_data_col_types = cols(
+    BGN_DATE = col_date(format = "%m/%d/%Y %H:%M:%S")
+)
+
+csv_storm_data <- read_csv("repdata-data-StormData.csv.bz2", col_types = storm_data_col_types)
+
+```
+
+This creates a large object in memory.
+```{r}
+format(object.size(csv_storm_data) , units = "Mb")
+```
+
+Since we do not require all the columns, only the ones directly required for analysis are selected.  These are:
+
+* `BGN_DATE` - the date the event happened
+* `EVTYPE` - the weather event type
+* `FATALITIES` - an estimate of the number of fatalities
+* `INJURIES` - an estimate of the number of injuries
+* `PROPDMG` - an estimate of the property damage in US Dollars
+* `PROPDMGEXP` - an exponent for multiplying PROPDMG
+* `CROPDMG` - an estimate of the crop damage in US Dollars
+* `CROPDMGEXP` - an exponent for multiplying CROPDMG
+
+```{r}
+storm_data <- csv_storm_data %>%
+                  select(BGN_DATE,   EVTYPE,
+                         FATALITIES, INJURIES,
+                         PROPDMG,    PROPDMGEXP,
+                         CROPDMG,    CROPDMGEXP)
+
+```
+
+This greatly reduced the size of the data set.
+```{r}
+format(object.size(storm_data) , units = "Mb")
+```
+
+### Filtering out older years
+
+The report looked at the number of different event types (EVTYPE) by year.
+
+```{r}
+storm_year_event <- storm_data %>%
+                        mutate(event_year = year(BGN_DATE)) %>%
+                        group_by(event_year, EVTYPE) %>%
+                        summarise(event_count = n())
+
+# Show a count of the different EVTYPEs by year
+table(storm_year_event$event_year)
+```
+
+From the table above, many more *types* of event were recorded from 1994 onwards.  
+
+```{r}
+storm_year_event %>% 
+    group_by(event_year) %>% 
+    summarise(n_events = sum(event_count)) %>%
+    arrange(desc(event_year)) %>% 
+    head(20)
+```
+
+There is also a jump in the number of events between 1993 and 1994 and future years.  Therefore, the report looked only at data from 1994 onwards to 2011.
+
+```{r}
+# extract data from 1994 onwards
+storm_data <- storm_data %>% filter(BGN_DATE >= "1994-01-01")
+```
+
+Check the first few rows:
+```{r}
+kable(head(storm_data), caption = "Filtered storm data from 1994 onwards (first few rows)")
+```
+
+This reduces the size of the `storm_data` set to `r format(nrow(storm_data), big.mark = ',')` rows.
+
+
+
+### Cleaning EVTYPE
+
+#### 1. Converting to Upper Case
+
+The EVTYPE data has a mixture of upper and lower case.  To make this consistent, the event types were converted to all upper case.
+
+
+```{r}
+storm_data <- storm_data %>% mutate(EVTYPE = toupper(EVTYPE))
+```
+
+
+
+
+#### 2. Matching to standard EVTYPEs
+
+A list of standard EVTYPE is provided in the "National Weather Service Instruction document", on "Table 2.1.1 Storm Data Event Table".
+
+By looking at the EVTYPE in the data set, it can be seen that there are quite a few values that do not correspond to the documented list.  For example, "THUNDERSTORM**W** WIND*S*", "TSTM", and "THUNDE**RT**ORM WIND**S**" instead of "THUNDERSTORM WIND".
+
+Also, there are some EVTYPEs that use a different terminology to the standard list.  The main ones that were found were:
+
+* Dry Microburst - this was matched with the standard "THUNDERSTORM WIND" by using information on [Wikipedia](https://en.wikipedia.org/wiki/Microburst#Dry_microbursts)
+* Gustnado - again, this was matched with "THUNDERSTORM WIND" by using information on [Wikipedia](https://en.wikipedia.org/wiki/Gustnado)
+* Winter Storm events were examined using the following link to the [NOAA storm events database](https://www.ncdc.noaa.gov/stormevents/listevents.jsp?eventType=%28Z%29+Frost%2FFreeze&eventType=%28Z%29+Ice+Storm&eventType=%28Z%29+Winter+Storm&eventType=%28Z%29+Winter+Weather&beginDate_mm=12&beginDate_dd=19&beginDate_yyyy=1999&endDate_mm=12&endDate_dd=21&endDate_yyyy=1999&hailfilter=0.00&tornfilter=0&windfilter=000&sort=DT&submitbutton=Search&statefips=-999%2CALL).  This database is referenced by the "How To Handle Exponent Value of PROPDMGEXP and CROPDMGEXP" web page
+
+
+To clean this data, a set of transformations were created to map non-standard EVTYPE values from the data set to the standard ones.
+This consisted of a regular expression to match the non-standard value and a corresponding string with the standard name.  This was not an exact process as the regular expressions could be greedy and match too much of the EVTYPE value.  I also looked at the function `str_replace_all()` - this was much faster, but it would match multiple expressions.
+This set of transformations was then used by a function to replace non-standard EVTYPEs with standard ones.
+
+
+Tidy event types to match those in documentation
+
+```{r}
+# A list of expressions to match and their replacement
+event_translations <- read_csv(
+"pattern,event_type
+(.*FIRE.*),WILDFIRE
+(.*HIGH WIND.*),HIGH WIND
+(.*HEAVY RAIN.*),HEAVY RAIN
+(.*(COLD|CHILL).*),COLD/WIND CHILL
+(.*(FREEZ|FROST).*),FROST/FREEZE
+(.*FLASH FLOOD.*),FLASH FLOOD
+(.*FLOOD.*),FLOOD
+(.*STREAM FLD.*),FLOOD
+(.*HAIL.*),HAIL
+(^TORNADO.*),TORNADO
+(LANDSLIDE),DEBRIS FLOW
+(HURRICANE.*),HURRICANE (TYPHOON)
+(.*TYPHOON.*),HURRICANE (TYPHOON)
+(S.*THUNDER.*),THUNDERSTORM WIND
+(THUNDERSTORM.*WIN.*),THUNDERSTORM WIND
+(^TSTM.*),THUNDERSTORM WIND
+(^TROPICAL STORM.*),TROPICAL STORM
+(.*WIND.*),STRONG WIND
+(.*EX.*HEAT.*),EXCESSIVE HEAT
+(.*HEAT.*),HEAT
+(.*RAIN.*),HEAVY RAIN
+(.*WET.*),HEAVY RAIN
+(.*SURGE.*),STORM SURGE/TIDE
+(.*THUNDE.*),THUNDERSTORM WIND
+(.*SNOW.*),HEAVY SNOW
+(.*FOG.*),DENSE FOG
+(.*SURF.*),HIGH SURF
+(.*HIGH TIDE.*),STORM SURGE/TIDE
+(.*WINTER WEATHER.*),WINTER WEATHER
+(.*MICROBURST.*),THUNDERSTORM WIND
+(.*WATERSPOUT.*),WATERSPOUT
+(.*GUSTNADO.*),THUNDERSTORM WIND
+(.*ICE.*),WINTER STORM")
+
+translate_event_type <- function(event_string) {
+
+    # save the maximum number of regular expressions we have to process for each EVTYPE
+    event_translations_length <- nrow(event_translations)
+
+    unlist(
+        lapply(event_string, function(x) {
+            for (ix in 1:event_translations_length) {
+
+               # Search for a matching string and replace if found
+               event_tidy <- str_replace(x,
+                                         event_translations[ix,1]$pattern,
+                                         event_translations[ix,2]$event_type)
+
+               # If we have replaced the text, then exit out of the for-loop
+               if ( event_tidy != x ) {
+                   break
+               }
+            }
+            # Return the EVTYPE or the cleaned EVTYPE
+            event_tidy
+        })
+    )
+}
+```
+
+Note that there are `r format(nrow(storm_data), big.mark = ',')` rows of data in `storm_data`.  Running the `translate_event_type()` function on this data set took a long time (more than 10 minutes).  So, the actual cleaning of EVTYPE was done on aggregated data as below.
+
+
+
+### Process Fatalities and Injuries
+
+Events where no fatalities or injuries occurred were filtered out - again reducing the number of rows
+
+```{r}
+storm_harm <- storm_data %>% filter(FATALITIES > 0 | INJURIES > 0)
+```
+
+To reduce the size of the data sets, separate data sets were created for Fatalities and Injuries.  These were then cleaned as described above, the EVTYPE was standardised.  The data set was aggregated based on the EVTYPE.
+
+
+#### Fatalities
+
+```{r}
+# Aggregate by EVTYPE to remove date data
+fatal_sum <- storm_harm %>% filter(FATALITIES > 0) %>%
+                            group_by(EVTYPE) %>%
+                            summarise(fatalities_count = sum(FATALITIES))
+
+# Aggregate by cleaned EVTYPE
+fatal_sum_clean <- fatal_sum %>% mutate(EVTYPE = translate_event_type(EVTYPE)) %>%
+                                 group_by(EVTYPE) %>%
+                                 summarise(fatalities_total = sum(fatalities_count)) %>%
+                                 arrange(desc(fatalities_total))
+
+```
+
+#### Injuries
+
+The same steps were performed for injuries:
+
+
+```{r}
+injury_sum <- storm_harm %>% filter(INJURIES > 0) %>%
+                             group_by(EVTYPE) %>%
+                             summarise(injuries_count = sum(INJURIES))
+
+injury_sum_clean <- injury_sum %>%
+                      mutate(EVTYPE = translate_event_type(EVTYPE)) %>%
+                      group_by(EVTYPE) %>%
+                      summarise(injuries_total = sum(injuries_count)) %>%
+                      arrange(desc(injuries_total))
+
+```
+
+
+
+### Process Crop and Property Damage
+
+Similar to fatalities and injuries, the EVTYPE values were cleaned and the data sets were aggregated by that variable.
+
+Events where no damage occurred were filtered out.
+
+```{r}
+storm_damage <- storm_data %>% filter(CROPDMG > 0 | PROPDMG > 0)
+```
+
+To calculate damage, the cost (CROPDMG and PROPDMG) had to be multiplied by a factor that was determined by a corresponding exponent column (CROPDMGEXP and PROPDMGEXP).
+
+There were some issues related to this calculation and "How To Handle Exponent Value of PROPDMGEXP and CROPDMGEXP" web page was very helpful.
+
+For example, there are some storms where property damage is non-zero, but the exponent is NA
+
+```{r}
+storm_damage %>% filter(PROPDMG != 0) %>% filter(is.na(PROPDMGEXP))
+```
+
+There are similar cases for crop damage data.
+```{r}
+storm_damage %>% filter(CROPDMG != 0) %>% filter(is.na(CROPDMGEXP)) %>% select(BGN_DATE, EVTYPE, CROPDMG, CROPDMGEXP)
+```
+
+
+To calculate the crop and property cost, a function to translate the exponent to a number was created:
+
+```{r}
+# See https://rstudio-pubs-static.s3.amazonaws.com/58957_37b6723ee52b455990e149edde45e5b6.html
+# Overall conclusion for all numeric, exp 0, 1, 2, 3, 4, 5, 6, 7, 8, they are multiplier of 10.
+#   e.g. 50 exp 0 is 500, 88 exp 5 is 880
+# empty-character () is == multiplier of 0.
+
+# Translate exponent character to a number
+exp_translations <- c("+" = 1,
+                      "H" = 100,
+                      "K" = 1000,
+                      "M" = 1000000,
+                      "B" = 1000000000)
+
+convert_exp <- function(exp_str) {
+    # check if the EXP is a number
+    exp_number <- as.integer(exp_str)
+    # check if the EXP can be mapped to a number
+    exp_factor <- ifelse(is.na(exp_number), exp_translations[toupper(exp_str)], 10)
+    # otherwise set it to 0
+    exp_factor <- ifelse(is.na(exp_factor), 0, exp_factor)
+    exp_factor
+}
+```
+
+The crop and damage costs were then calculated using the above function as follows:
+
+
+```{r}
+storm_damage <- storm_damage %>%
+                    mutate(crop_damage = convert_exp(CROPDMGEXP) * CROPDMG,
+                           prop_damage = convert_exp(PROPDMGEXP) * PROPDMG)
+```
+
+
+#### Crop Damage
+
+A data set containing events that caused crop damage was created.  This was aggregated by the event type (EVTYPE).
+
+```{r}
+crop_sum <- storm_damage %>% filter(CROPDMG > 0) %>%
+                group_by(EVTYPE) %>%
+                summarise(crop_damage_total = sum(crop_damage))
+
+```
+
+This is now a much smaller data set (`r nrow(crop_sum)` rows) and the `translate_event_type()` function can be executed and run with in a short time (a few seconds).
+
+```{r}
+crop_sum_clean <- crop_sum %>%
+                      mutate(EVTYPE = translate_event_type(EVTYPE)) %>%
+                      group_by(EVTYPE) %>%
+                      summarise(crop_damage_cost = sum(crop_damage_total)) %>%
+                      arrange(desc(crop_damage_cost))
+
+```
+
+#### Property Damage
+
+The same steps were performed for property damage:
+
+```{r}
+prop_sum <- storm_damage %>% filter(PROPDMG > 0) %>%
+                group_by(EVTYPE) %>%
+                summarise(prop_damage_total = sum(prop_damage))
+
+prop_sum_clean <- prop_sum %>%
+                      mutate(EVTYPE = translate_event_type(EVTYPE)) %>%
+                      group_by(EVTYPE) %>%
+                      summarise(prop_damage_cost = sum(prop_damage_total)) %>%
+                      arrange(desc(prop_damage_cost))
+
+```
+
+
+
+
+## Results
+
+
+
+
+
+### Weather events that are most harmful with respect to population health
+
+From the `fatal_sum_clean` and `injury_sum_clean` data sets, it can be seen that injuries are more common than fatalities.
+
+Fatalities
+```{r}
+kable(head(fatal_sum_clean),
+      caption = "Fatalities by Weather Event (first few rows)",
+      format.args = list(big.mark = ','))
+```
+
+Injuries
+```{r}
+kable(head(injury_sum_clean),
+      caption = "Injuries by Weather Event (first few rows)",
+      format.args = list(big.mark = ','))
+```
+
+
+The two data sets were cut off data points at an appropriate quantile. In this way, only the top most harmful weather events were plotted and tabulated below.  This was found by trying different quantiles and plotting the results.
+
+```{r}
+quantile(fatal_sum_clean$fatalities_total)
+```
+```{r}
+quantile(injury_sum_clean$injuries_total)
+```
+
+
+Plot a facet grid between injuries and fatalities
+```{r fig.width = 9,fig.height = 10}
+fatal_cut_off  <- quantile(fatal_sum_clean$fatalities_total)[4]
+injury_cut_off <- quantile(injury_sum_clean$injuries_total)[4]
+
+# Join the two data sets into one
+storm_harm_total <- full_join(fatal_sum_clean, injury_sum_clean, by = c("EVTYPE") )
+
+# Combine fatalities and injuries into one column
+storm_harm_type <- storm_harm_total %>%
+        select(event = EVTYPE,
+               Fatalities = fatalities_total,
+               Injuries   = injuries_total) %>%
+        gather(harm_type, harm_total, -event) %>%
+        filter( (harm_type == 'Fatalities'  & harm_total >= fatal_cut_off) |
+                (harm_type == 'Injuries'    & harm_total >= injury_cut_off) )
+
+# Plot results - note that reoder() does not work as expected - perhaps due to facet_grid()
+storm_harm_type %>%
+    ggplot(aes(reorder(event, harm_total), harm_total, fill = event) ) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    theme(legend.position = "none") +
+    facet_grid(harm_type ~ .) +
+    labs(x = "Weather Event Type",
+         y = "Estimated accounts of injuries and fatalities") +
+    ggtitle("Most harmful weather events between 1994 and 2011")
+
+```
+
+Tabulated results show the most harmful events.
+```{r}
+harm <- as.data.frame(storm_harm_type %>% arrange(desc(harm_total)))
+kable(head(harm,10), caption = "Most harmful weather events ordered by most number of cases first", format.args = list(big.mark = ','))
+```
+
+So, tornadoes cause the most injuries, while heat events cause the more fatalities.
+
+
+
+### Weather events that have the greatest economic consequences
+
+From the `prop_sum_clean` and `prop_sum_clean` data sets, it can be seen that damage to property is larger than crop damage.
+
+Crop Damage
+```{r}
+kable(head(crop_sum_clean), caption = "Crop damage per weather event in US Dollars (first few rows, ordered by most expensive first)", format.args = list(big.mark = ','))
+```
+
+Property Damage
+```{r}
+kable(head(prop_sum_clean), caption = "Property damage per weather event in US Dollars  (first few rows, ordered by most expensive first)", format.args = list(big.mark = ','))
+```
+
+
+For generating a plot of crop and property damage, the data sets were filtered based on a appropriate value from the above quantiles.  This was found by trying different quantiles and plotting the results.
+
+```{r}
+quantile(crop_sum_clean$crop_damage_cost)
+```
+```{r}
+quantile(prop_sum_clean$prop_damage_cost)
+```
+
+```{r}
+crop_cut_off_cost <- quantile(crop_sum_clean$crop_damage_cost)[3]
+prop_cut_off_cost <- quantile(prop_sum_clean$prop_damage_cost)[4]
+```
+
+A facet grid between crop and property damage was plotted.
+
+```{r fig.width = 9,fig.height = 10}
+storm_damage_total <- full_join(crop_sum_clean, prop_sum_clean, by = c("EVTYPE") )
+
+storm_damage_type <- storm_damage_total %>%
+        select(event    = EVTYPE,
+               Crop     = crop_damage_cost,
+               Property = prop_damage_cost) %>%
+        gather(damage_type, damage_cost, -event) %>%
+        filter( (damage_type == 'Crop'     & damage_cost >= crop_cut_off_cost) |
+                (damage_type == 'Property' & damage_cost >= prop_cut_off_cost) )
+
+storm_damage_type %>%
+    ggplot(aes(reorder(event, damage_cost), damage_cost/1000000, fill = event) ) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    theme(legend.position = "none") +
+    facet_grid(damage_type ~ .) +
+    labs(x = "Weather Event Type",
+         y = "Estimated cost of crop and property damage in US Dollars (Millions)") +
+    ggtitle("Highest economic impact weather events between 1994 and 2011")
+
+```
+
+```{r}
+damage <- as.data.frame(storm_damage_type %>% arrange(desc(damage_cost)))
+kable(head(damage,10),
+      caption = "Top most damage causing weather events by type of damage in US Dollars",
+      format.args = list(big.mark = ','))
+```
+
+
+So, floods have the greatest economic impact on property, while droughts have the greatest economic impact on crops.
+
+
+## Notes
+
+Created using RStudio with the following version of R:
+
+```{r}
+R.version
+```
